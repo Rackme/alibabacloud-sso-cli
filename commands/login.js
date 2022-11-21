@@ -9,6 +9,7 @@ const inquirer = require('inquirer');
 const SSO = require('../lib/sso');
 const Portal = require('../lib/portal');
 const helper = require('../lib/helper');
+const { argv } = require('process');
 
 class Login {
   constructor(app) {
@@ -24,6 +25,10 @@ class Login {
       force: {
         required: false,
         description: 'ignore cached credential'
+      },
+      all: {
+        required: false,
+        description: 'get all accounts'
       },
       env: {
         required: false,
@@ -102,6 +107,7 @@ class Login {
 
     const accessToken = cache.accessToken.token;
     const url = ctx.signinUrl;
+    var result;
     const portal = new Portal({
       host: url.host,
       protocol: url.protocol,
@@ -109,103 +115,165 @@ class Login {
     });
 
     let accountId, accessConfigurationId;
-    if (cache.profiles[profile]) {
-      // use the saved accountId, accessConfigurationId
-      [accountId, accessConfigurationId] = cache.profiles[profile].split(':');
-    } else {
-      const accounts = await portal.listAllAccounts();
+    // HOME : ADD DUMP ALL ACCOUNT
+    if (ctx.all){
+        console.log(`[ALL] Generate All token`);
+        // 1
+        const accounts = await portal.listAllAccounts();
+        console.log(`[ACCOUNTS numbers:${accounts.length}]:`);
+        console.log(accounts);
+        // const token = accounts.map((d) => {
+        //     d.DisplayName
+        //     d.AccountId
+        //     return {
+        //         name: `${d.DisplayName}(${d.AccountId})`,
+        //         value: d
+        //     };
+        //     });
+        //2
+        // https://advancedweb.hu/how-to-use-async-functions-with-array-map-in-javascript/
 
-      if (accounts.length === 0) {
-        console.error(`You don't have access to any account.`);
-        process.exit(-1);
-      }
-
-      let sa;
-      if (accounts.length > 1) {
-        // 有多个账号时启动选择
-        const choices = accounts.map((d) => {
-          return {
-            name: `${d.DisplayName}(${d.AccountId})`,
-            value: d
-          };
+        const configs = await Promise.all(accounts.map(async (acc) => { return {
+            name: `${acc.DisplayName}(${acc.AccountId})`,
+            accountId : acc.AccountId,
+            accessconf: await portal.listAllAccessConfigurations({
+                accountId: acc.AccountId
+            })
+        }}));
+        //3
+        console.log(`[configs]`);
+        console.log(JSON.stringify((configs)))
+        const credentials = await Promise.all(configs.map(async (config) => { return {
+            name: config.name,
+            request: await portal.createCloudCredential({
+                accountId: config.accountId,
+                accessConfigurationId: config.accessconf[0].AccessConfigurationId
+                })
+            }
+        }));
+        console.log(`[createCloudCredential]`);
+        console.log(JSON.stringify(credentials))
+        result = credentials.map( (credential) => { return {
+            name: credential.name,
+            expireTime: new Date(credential.request.CloudCredential.Expiration).getTime(),
+            data: {
+                'mode': 'StsToken',
+                'access_key_id': credential.request.CloudCredential.AccessKeyId,
+                'access_key_secret': credential.request.CloudCredential.AccessKeySecret,
+                'sts_token': credential.request.CloudCredential.SecurityToken
+            }
+            }
         });
-        const account = await inquirer.prompt([{
-          type: 'list',
-          name: 'account',
-          choices: choices,
-          message: `You have ${accounts.length} accounts, please select one:`
-        }]);
-        sa = account.account;
-      } else {
-        sa = accounts[0];
-      }
+        console.log(`[result]`);
+        console.log(JSON.stringify(result))
 
-      accountId = sa.AccountId;
-      console.log(`used account: ${sa.DisplayName}(${accountId})`);
 
-      const configs = await portal.listAllAccessConfigurations({
-        accountId: accountId
-      });
+    // RAM user / role / privilege 
 
-      let selectedConfig;
-      if (configs.length > 1) {
-        const choices = configs.map((d) => {
-          return {
-            name: `${d.AccessConfigurationName}(${d.AccessConfigurationId})`,
-            value: d
-          };
+    } else { 
+        console.log(`[LOGIN] WITHOUT ALL PARAM`);
+        if (cache.profiles[profile]) {
+        // use the saved accountId, accessConfigurationId
+        [accountId, accessConfigurationId] = cache.profiles[profile].split(':');
+        } else {
+        const accounts = await portal.listAllAccounts();
+
+        if (accounts.length === 0) {
+            console.error(`You don't have access to any account.`);
+            process.exit(-1);
+        }
+
+        let sa;
+
+        if (accounts.length > 1) {
+            // 有多个账号时启动选择
+            const choices = accounts.map((d) => {
+            return {
+                name: `${d.DisplayName}(${d.AccountId})`,
+                value: d
+            };
+            });
+            const account = await inquirer.prompt([{
+            type: 'list',
+            name: 'account',
+            choices: choices,
+            message: `You have ${accounts.length} accounts, please select one:`
+            }]);
+            sa = account.account;
+        } else {
+            sa = accounts[0];
+        }
+
+        accountId = sa.AccountId;
+        console.log(`used account: ${sa.DisplayName}(${accountId})`);
+
+        const configs = await portal.listAllAccessConfigurations({
+            accountId: accountId
         });
-        const answers = await inquirer.prompt([{
-          type: 'list',
-          name: 'configuration',
-          choices: choices,
-          message: `You have ${configs.length} access configurations, please select one:`
-        }]);
-        selectedConfig = answers.configuration;
-      } else {
-        selectedConfig = configs[0];
-      }
 
-      accessConfigurationId = selectedConfig.AccessConfigurationId;
-      console.log(`used access configuration: ${selectedConfig.AccessConfigurationName}(${accessConfigurationId})`);
-    }
+        let selectedConfig;
+        if (configs.length > 1) {
+            const choices = configs.map((d) => {
+            return {
+                name: `${d.AccessConfigurationName}(${d.AccessConfigurationId})`,
+                value: d
+            };
+            });
+            const answers = await inquirer.prompt([{
+            type: 'list',
+            name: 'configuration',
+            choices: choices,
+            message: `You have ${configs.length} access configurations, please select one:`
+            }]);
+            selectedConfig = answers.configuration;
+        } else {
+            selectedConfig = configs[0];
+        }
 
-    const credential = await portal.createCloudCredential({
-      accountId: accountId,
-      accessConfigurationId: accessConfigurationId
-    });
+        accessConfigurationId = selectedConfig.AccessConfigurationId;
+        console.log(`used access configuration: ${selectedConfig.AccessConfigurationName}(${accessConfigurationId})`);
+        }
 
-    const result = {
-      expireTime: new Date(credential.CloudCredential.Expiration).getTime(),
-      data: {
-        'mode': 'StsToken',
-        'access_key_id': credential.CloudCredential.AccessKeyId,
-        'access_key_secret': credential.CloudCredential.AccessKeySecret,
-        'sts_token': credential.CloudCredential.SecurityToken
-      }
-    };
+        const credential = await portal.createCloudCredential({
+        accountId: accountId,
+        accessConfigurationId: accessConfigurationId
+        });
 
-    // save into cache
-    const cacheKey = `${accountId}:${accessConfigurationId}`;
-    cache.current = profile;
-    cache.profiles[profile] = cacheKey;
-    cache.map[cacheKey] = {expireTime: result.expireTime, data: result.data};
-    helper.saveSTSCache(cache);
+        result = {
+        expireTime: new Date(credential.CloudCredential.Expiration).getTime(),
+        data: {
+            'mode': 'StsToken',
+            'access_key_id': credential.CloudCredential.AccessKeyId,
+            'access_key_secret': credential.CloudCredential.AccessKeySecret,
+            'sts_token': credential.CloudCredential.SecurityToken
+        }
+        };
 
+        // save into cache
+        const cacheKey = `${accountId}:${accessConfigurationId}`;
+        cache.current = profile;
+        cache.profiles[profile] = cacheKey;
+        cache.map[cacheKey] = {expireTime: result.expireTime, data: result.data};
+        helper.saveSTSCache(cache);
+    } 
     return result;
   }
 
-  display(data, env) {
-    if (env) {
-      console.log(`export ALIBABACLOUD_ACCESS_KEY_ID=${data.access_key_id}`);
-      console.log(`export ALIBABACLOUD_ACCESS_KEY_SECRET=${data.access_key_secret}`);
-      console.log(`export SECURITY_TOKEN=${data.sts_token}`);
+  display(result, env) {
+    if (env && result.hasOwnProperty("data")) {
+      console.log(`export ALIBABACLOUD_ACCESS_KEY_ID=${result.data.access_key_id}`);
+      console.log(`export ALIBABACLOUD_ACCESS_KEY_SECRET=${result.data.access_key_secret}`);
+      console.log(`export SECURITY_TOKEN=${result.data.sts_token}`);
       console.log(`# for terraform`);
-      console.log(`export ALICLOUD_ACCESS_KEY=${data.access_key_id}`);
-      console.log(`export ALICLOUD_SECRET_KEY=${data.access_key_secret}`);
-      console.log(`export ALICLOUD_SECURITY_TOKEN=${data.sts_token}`);
+      console.log(`export ALICLOUD_ACCESS_KEY=${result.data.access_key_id}`);
+      console.log(`export ALICLOUD_SECRET_KEY=${result.data.access_key_secret}`);
+      console.log(`export ALICLOUD_SECURITY_TOKEN=${result.data.sts_token}`);
     } else {
-      console.log(JSON.stringify(data, null, 2));
+        if (Array.isArray(result)) {
+            console.log(JSON.stringify(result, null, 2));
+        } else if (result.hasOwnProperty("data")){
+            console.log(JSON.stringify(result.data, null, 2));
+        }
     }
   }
 
@@ -221,7 +289,7 @@ class Login {
       process.exit(-1);
     }
 
-    const ctx = { cache, config, signinUrl: new URL(signinUrl), profile };
+    const ctx = { cache, config, signinUrl: new URL(signinUrl), profile, all:argv.all };
 
     if (!argv.force) {
       // 没有强制登录，优先检查缓存
@@ -236,7 +304,7 @@ class Login {
     }
 
     const result = await this.login(ctx);
-    this.display(result.data, argv.env);
+    this.display(result, argv.env);
   }
 }
 
